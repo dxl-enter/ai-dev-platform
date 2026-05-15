@@ -1,1 +1,69 @@
+# AI Dev Platform 全局配置
 
+platform:
+  version: "2.0"
+  
+  # LLM配置
+  llm:
+    provider: "anthropic"  # anthropic | openai
+    models:
+      architect: "claude-sonnet-4-20250514"   # 用于P1/P2/P3（设计思考）
+      developer: "claude-code-sonnet"          # 用于P4（代码生成）
+      reviewer: "claude-sonnet-4-20250514"     # 用于P5（代码审查）
+    
+    defaults:
+      max_tokens: 8192
+      temperature:
+        creative: 0.7   # P1/P2用
+        precise: 0.1    # P4用
+      context_window: 800000  # 留20%余量
+
+  # 流水线配置
+  pipeline:
+    stages:
+      - P1_RequirementsGen
+      - P2_DesignGen
+      - P3_TaskGen
+      - P4_Develop
+      - P5_Review
+      - P6_Test
+    
+    # Human Gate配置（哪些阶段需要人工确认）
+    human_gates:
+      P1: always        # always | never | conditional
+      P2: always
+      P3: conditional   # 总任务>20时触发
+      P4: conditional   # 有安全敏感代码时触发
+      P5: never
+      P6: conditional   # 测试失败率>10%时触发
+    
+    # 回溯策略
+    rollback:
+      max_retries: 3
+      max_total_retries: 8
+      
+  # Spec版本控制
+  specs:
+    base_dir: "specs"
+    templates_dir: "src/templates"
+    freeze_on_gate_pass: true  # Human Gate通过后冻结
+    
+  # 项目注册
+  projects:
+    - id: "maamcare"
+      name: "经销商双红包订货系统"
+      repo: "git@github.com:company/maamcare.git"
+      tech_stack:
+        frontend: "react"
+        backend: "java"
+        ui_lib: "antd"
+        state_mgmt: "zustand"
+    
+    - id: "default"
+      name: "默认项目"
+      repo: ""
+      tech_stack:
+        frontend: "react"
+        backend: "nodejs"
+        ui_lib: "antd"
+        state_mgmt: "zustand"
