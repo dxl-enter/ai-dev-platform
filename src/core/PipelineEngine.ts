@@ -1,5 +1,3 @@
-// src/core/PipelineEngine.ts
-
 import { EventBus } from './EventBus';
 import { ContextAssembler } from './ContextAssembler';
 import { SpecVersionControl } from './SpecVersionControl';
@@ -268,4 +266,114 @@ export class PipelineEngine {
 
     logger.info(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     logger.info(`✅ 流水线完成: ${featureName}`);
-    logger.info(`   阶段数:
+    logger.info(`   阶段数: ${stageResults.length}`);
+    logger.info(`   产物数: ${artifacts.length}`);
+    logger.info(`   回溯次数: ${this.totalRetries}`);
+    logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+
+    return {
+      featureName,
+      stages: stageResults,
+      success: true,
+      artifacts,
+    };
+  }
+
+  /**
+   * 获取输入适配器
+   */
+  private getAdapter(source: string): any {
+    // 动态导入适配器
+    switch (source) {
+      case 'jira':
+        const { JiraAdapter } = require('../adapters/JiraAdapter');
+        return new JiraAdapter();
+      case 'github':
+        const { GithubAdapter } = require('../adapters/GithubAdapter');
+        return new GithubAdapter();
+      case 'telegram':
+        const { TelegramAdapter } = require('../adapters/TelegramAdapter');
+        return new TelegramAdapter();
+      case 'manual':
+      default:
+        const { ManualAdapter } = require('../adapters/ManualAdapter');
+        return new ManualAdapter();
+    }
+  }
+
+  /**
+   * 判断是否需要触发Human Gate
+   */
+  private shouldTriggerHumanGate(stage: string, result: StageResult): boolean {
+    const gateConfig = configManager.getPipelineConfig().human_gates[stage];
+    
+    if (gateConfig === 'always') return true;
+    if (gateConfig === 'never') return false;
+    
+    // conditional
+    if (gateConfig === 'conditional') {
+      if (stage === 'P3') {
+        // 任务数 > 20
+        return (result.output?.totalTasks || 0) > 20;
+      }
+      if (stage === 'P4') {
+        // 有安全敏感代码
+        return result.output?.hasSecurityCode || false;
+      }
+      if (stage === 'P6') {
+        // 测试失败率 > 10%
+        return (result.output?.failureRate || 0) > 0.1;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * 处理回溯事件
+   */
+  private async handleRollback(event: any): Promise<void> {
+    const { featureName, fromStage, toStage, reason } = event.payload;
+    
+    await this.specVersionControl.recordRollback(
+      featureName,
+      fromStage,
+      toStage,
+      reason
+    );
+
+    logger.warn(`⏪ 回溯: ${fromStage} → ${toStage}`);
+    logger.warn(`   原因: ${reason}`);
+  }
+
+  /**
+   * 处理任务失败事件
+   */
+  private async handleTaskFailure(event: any): Promise<void> {
+    const { featureName, taskId, error, specIssue } = event.payload;
+
+    if (specIssue) {
+      logger.warn(`⚠️ 任务 ${taskId} 发现spec问题，触发回溯`);
+      await this.eventBus.emit('pipeline.rollback', {
+        featureName,
+        fromStage: 'P4',
+        toStage: specIssue.affectsStage || 'P2',
+        reason: `Task ${taskId}: ${error}`,
+      });
+    }
+  }
+
+  /**
+   * 获取事件总线（供外部使用）
+   */
+  getEventBus(): EventBus {
+    return this.eventBus;
+  }
+
+  /**
+   * 获取版本控制（供外部使用）
+   */
+  getSpecVersionControl(): SpecVersionControl {
+    return this.specVersionControl;
+  }
+}
