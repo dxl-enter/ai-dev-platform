@@ -1,73 +1,143 @@
-type EventType = 
-  | 'feature.requested'      // 任何渠道的新需求
-  | 'spec.updated'           // spec被修改
-  | 'spec.approved'          // 人确认spec
-  | 'task.completed'         // 单个task完成
-  | 'task.failed'            // task失败需要回溯
-  | 'review.failed'          // 审查不通过
-  | 'pipeline.stage.complete'
-  | 'pipeline.stage.rollback'; // 回溯事件
+import { v4 as uuidv4 } from 'uuid';
+import { EventType, PipelineEvent, EventHandler } from '../types';
+import { logger } from '../utils/logger';
 
-interface PipelineEvent {
-  type: EventType;
-  projectId: string;
-  featureName: string;
-  payload: Record<string, any>;
-  timestamp: number;
-  // 回溯链：记录这个事件是从哪个事件触发的
-  triggerChain: string[];
-}
+export class EventBus {
+  private handlers: Map<EventType, Set<EventHandler>> = new Map();
+  private eventLog: PipelineEvent[] = [];
+  private featureEventMap: Map<string, PipelineEvent[]> = new Map();
 
-class EventBus {
-  private handlers: Map<EventType, Set<(event: PipelineEvent) => Promise<void>>> = new Map();
-  private eventLog: PipelineEvent[] = []; // 完整事件日志，用于回溯
-
-  on(type: EventType, handler: (event: PipelineEvent) => Promise<void>) {
+  /**
+   * 注册事件处理器
+   */
+  on(type: EventType, handler: EventHandler): void {
     if (!this.handlers.has(type)) {
       this.handlers.set(type, new Set());
     }
     this.handlers.get(type)!.add(handler);
+    logger.debug(`注册事件处理器: ${type}`);
   }
 
-  async emit(type: EventType, payload: Record<string, any>, triggerChain: string[] = []) {
-    const event: PipelineEvent = {
-      type,
-      projectId: payload.projectId,
-      featureName: payload.featureName,
-      payload,
-      timestamp: Date.now(),
-      triggerChain: [...triggerChain, type]
-    };
-    
-    this.eventLog.push(event);
-    console.log(`📡 [EventBus] ${type} (chain: ${event.triggerChain.join(' → ')})`);
-    
+  /**
+   * 移除事件处理器
+   */
+  off(type: EventType, handler: EventHandler): void {
     const handlers = this.handlers.get(type);
     if (handlers) {
-      await Promise.all([...handlers].map(h => h(event)));
+      handlers.delete(handler);
     }
   }
 
-  // 获取某个feature的完整事件历史
+  /**
+   * 触发事件
+   */
+  async emit(
+    type: EventType,
+    payload: Record<string, any> = {},
+    triggerChain: EventType[] = []
+  ): Promise<void> {
+    const event: PipelineEvent = {
+      id: uuidv4(),
+      type,
+      projectId: payload.projectId || 'unknown',
+      featureName: payload.featureName || 'unknown',
+      payload,
+      timestamp: Date.now(),
+      triggerChain: [...triggerChain, type],
+    };
+
+    // 记录事件
+    this.eventLog.push(event);
+    
+    // 按feature分组
+    if (!this.featureEventMap.has(event.featureName)) {
+      this.featureEventMap.set(event.featureName, []);
+    }
+    this.featureEventMap.get(event.featureName)!.push(event);
+
+    // 日志输出
+    const chainStr = event.triggerChain.length > 1 
+      ? ` (chain: ${event.triggerChain.join(' → ')})`
+      : '';
+    logger.info(`📡 ${type}${chainStr}`);
+
+    // 触发所有处理器
+    const handlers = this.handlers.get(type);
+    if (handlers && handlers.size > 0) {
+      const promises = [...handlers].map(handler => 
+        handler(event).catch(err => {
+          logger.error(`事件处理器错误 [${type}]: ${err.message}`);
+        })
+      );
+      await Promise.all(promises);
+    }
+  }
+
+  /**
+   * 获取feature的完整事件历史
+   */
   getFeatureHistory(featureName: string): PipelineEvent[] {
-    return this.eventLog.filter(e => e.featureName === featureName);
+    return this.featureEventMap.get(featureName) || [];
   }
 
-  // 回溯到上一个阶段
-  async rollback(featureName: string, fromStage: string, reason: string) {
-    console.log(`⏪ [Rollback] ${fromStage} → 上一阶段，原因: ${reason}`);
-    const previousStage = this.getPreviousStage(fromStage);
-    await this.emit('pipeline.stage.rollback', {
-      featureName,
-      fromStage,
-      toStage: previousStage,
-      reason
-    });
+  /**
+   * 获取feature的最后N个事件
+   */
+  getRecentEvents(featureName: string, count: number = 10): PipelineEvent[] {
+    const history = this.getFeatureHistory(featureName);
+    return history.slice(-count);
   }
 
-  private getPreviousStage(stage: string): string {
-    const stages = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
-    const idx = stages.indexOf(stage);
-    return idx > 0 ? stages[idx - 1] : stages[0];
+  /**
+   * 查找特定类型的事件
+   */
+  findEvents(featureName: string, type: EventType): PipelineEvent[] {
+    return this.getFeatureHistory(featureName)
+      .filter(e => e.type === type);
+  }
+
+  /**
+   * 检查是否已经发生过某个事件
+   */
+  hasEvent(featureName: string, type: EventType): boolean {
+    return this.getFeatureHistory(featureName)
+      .some(e => e.type === type);
+  }
+
+  /**
+   * 获取事件统计
+   */
+  getStats(featureName: string): Record<string, number> {
+    const events = this.getFeatureHistory(featureName);
+    const stats: Record<string, number> = {};
+    
+    for (const event of events) {
+      stats[event.type] = (stats[event.type] || 0) + 1;
+    }
+    
+    return stats;
+  }
+
+  /**
+   * 获取回溯链（用于调试）
+   */
+  getTriggerChain(lastEvent: PipelineEvent): string {
+    return lastEvent.triggerChain.join(' → ');
+  }
+
+  /**
+   * 清理feature的事件记录
+   */
+  clearFeature(featureName: string): void {
+    this.featureEventMap.delete(featureName);
+    this.eventLog = this.eventLog.filter(e => e.featureName !== featureName);
+    logger.debug(`清理事件记录: ${featureName}`);
+  }
+
+  /**
+   * 获取全局事件总数
+   */
+  getTotalEventCount(): number {
+    return this.eventLog.length;
   }
 }
